@@ -1,150 +1,166 @@
-#Settings:
-useWSGI = False#not fully tested and WILL NOT support multible instances/workers with the plaintext database
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import atexit
+import os
+import sys
+import time
+
+# Settings retained from the original project.
+useWSGI = False  # Historical name: this creates a Twisted service application.
 port = 8080
 
-#import:
-print "Importing modules...",
-from twisted.web import server#filehost
-from twisted.internet import reactor
-if useWSGI: from twisted.application import internet, service
 
-import sys, time, os, atexit
-print "Done!"
+def _force_project_working_directory():
+    base = os.path.dirname(os.path.abspath(__file__))
+    if base:
+        os.chdir(base)
 
-#set working directory
-if os.path.dirname(__file__):
-	os.chdir(os.path.dirname(__file__))
-else:
-	for i in sys.path:
-		path = os.path.split(i)[0]
-		if not os.path.exists(os.path.join(path, "server.py")): continue
-		if not os.path.exists(os.path.join(path, "hatena.py")): continue
-		if not os.path.exists(os.path.join(path, "DB.py")): continue
-		os.chdir(path)
-		break
-	else:
-		print "Can't force working directory, may fail crash!"
 
-#Logging
+def _import_twisted():
+    try:
+        from twisted.internet import reactor
+        from twisted.web import server
+    except ImportError as exc:
+        raise SystemExit(
+            "Twisted is required to run the server. Install dependencies with: "
+            "python3 -m pip install -r requirements.txt"
+        ) from exc
+    return reactor, server
+
+
 class Log:
-	class filesplit:#a file object writing to two outputs
-		def __init__(self):
-			self.files = []
-		def write(self, data):
-			for i in self.files: i.write(data)
-		def flush(self):#ipython needs this
-			pass
-	def __init__(self):
-		minutes, seconds = map(int, time.strftime("%M %S").split(" "))
-		minutes = 59 - minutes
-		seconds = 59 - seconds
-		reactor.callLater(60*minutes + seconds + 5, self.HandleUpdate)
-		reactor.callLater(60*5, self.AutoFlush)
-		
-		#make year folder
-		if not os.path.exists("logs/"+time.strftime("%Y")):
-			os.mkdir("logs/"+time.strftime("%Y"))
-		
-		#make month folder
-		if not os.path.exists("logs/"+time.strftime("%Y/%B")):
-			os.mkdir("logs/"+time.strftime("%Y/%B"))
-		
-		self.Activityhandle = open(time.strftime("logs/%Y/%B/%d %B activity.log"),"a")
-		self.Errorhandle = open(time.strftime("logs/%Y/%B/%d %B error.log"),"a")
-		
-		self.stderr = sys.stderr
-		sys.stderr = self.filesplit()
-		sys.stderr.files.append(self.stderr)
-		sys.stderr.files.append(self.Errorhandle)
-		
-		self.write("Server startup...\n", True)
-	def HandleUpdate(self):#Automatically updates the handles for new filenames every hour
-		reactor.callLater(60*60, self.HandleUpdate)
-		
-		print time.strftime("[%H:%M:%S] Handle update")
-		
-		#make year folder
-		if not os.path.exists("logs/"+time.strftime("%Y")):
-			os.mkdir("logs/"+time.strftime("%Y"))
-		
-		#make month folder
-		if not os.path.exists("logs/"+time.strftime("%Y/%B")):
-			os.mkdir("logs/"+time.strftime("%Y/%B"))
-		
-		self.close()
-		
-		self.Activityhandle = open(time.strftime("logs/%Y/%B/%d %B activity.log"),"a")
-		self.Errorhandle = open(time.strftime("logs/%Y/%B/%d %B error.log"),"a")
-		
-		sys.stderr.files[1] = self.Errorhandle
-	def AutoFlush(self):#Automatically flushes the files 5 minutes between
-		reactor.callLater(60*5, self.AutoFlush)
-		self.flush()
-	def flush(self):#Flushes to the files
-		self.Activityhandle.flush()
-		os.fsync(self.Activityhandle.fileno())
-		
-		self.Errorhandle.flush()
-		os.fsync(self.Errorhandle.fileno())
-	def close(self):
-		self.Activityhandle.close()
-		self.Errorhandle.close()
-	#=====
-	def write(self, String, Silent=False):
-		if not Silent:
-			print time.strftime("[%H:%M:%S]"), String
-		self.Activityhandle.write(time.strftime("[%H:%M:%S] ") + String + "\n")
-	Print = write
-Log = Log()
+    class filesplit:
+        def __init__(self):
+            self.files = []
 
-#init database:
-print "Initializing flipnote database...",
-import DB
-print "Done!"
+        def write(self, data):
+            for output in self.files:
+                output.write(data)
+            return len(data)
 
-#Setup hatena server:
-print "Setting up hatena site...",
-import hatena
-hatena.ServerLog = Log
-site = server.Site(hatena.Setup())
-print "Done!"
+        def flush(self):
+            for output in self.files:
+                output.flush()
+
+    def __init__(self, reactor):
+        self.reactor = reactor
+        minutes, seconds = map(int, time.strftime("%M %S").split(" "))
+        minutes = 59 - minutes
+        seconds = 59 - seconds
+        reactor.callLater(60 * minutes + seconds + 5, self.HandleUpdate)
+        reactor.callLater(60 * 5, self.AutoFlush)
+        self._open_handles()
+
+        self.stderr = sys.stderr
+        sys.stderr = self.filesplit()
+        sys.stderr.files.extend((self.stderr, self.Errorhandle))
+        self.write("Server startup...", True)
+
+    def _open_handles(self):
+        directory = time.strftime("logs/%Y/%B")
+        os.makedirs(directory, exist_ok=True)
+        self.Activityhandle = open(
+            time.strftime("logs/%Y/%B/%d %B activity.log"), "a", encoding="utf-8"
+        )
+        self.Errorhandle = open(
+            time.strftime("logs/%Y/%B/%d %B error.log"), "a", encoding="utf-8"
+        )
+
+    def HandleUpdate(self):
+        self.reactor.callLater(60 * 60, self.HandleUpdate)
+        print(time.strftime("[%H:%M:%S] Handle update"))
+        old_error = self.Errorhandle
+        self.Activityhandle.close()
+        old_error.close()
+        self._open_handles()
+        if isinstance(sys.stderr, self.filesplit) and len(sys.stderr.files) > 1:
+            sys.stderr.files[1] = self.Errorhandle
+
+    def AutoFlush(self):
+        self.reactor.callLater(60 * 5, self.AutoFlush)
+        self.flush()
+
+    def flush(self):
+        for handle in (self.Activityhandle, self.Errorhandle):
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def close(self):
+        for handle in (self.Activityhandle, self.Errorhandle):
+            if not handle.closed:
+                handle.close()
+
+    def write(self, String, Silent=False):
+        line = str(String).rstrip("\n")
+        if not Silent:
+            print(time.strftime("[%H:%M:%S]"), line)
+        self.Activityhandle.write(time.strftime("[%H:%M:%S] ") + line + "\n")
+
+    Print = write
 
 
-#make the hatena server accept proxy connections:
-print "Setting up proxy hack...",
-silent = True
-old_buildProtocol = site.buildProtocol
-def buildProtocol(self, addr):
-	protocol = old_buildProtocol(addr)
-	
-	protocol.new_recv_buffer= []
-	
-	old_dataReceived = protocol.dataReceived
-	def dataReceived(self, data):
-		#i'll assume the GET request doesn't get fragmented, which should be safe with a mtu at 1500, a crash doesn't matter really anyway. too much work for a simple twisted upgrade on a dropped project
-		for check, repl in (("GET http://flipnote.hatena.com", "GET "), ("POST http://flipnote.hatena.com", "POST ")):
-			if check in data:
-				data = data.replace(check, repl)
-		old_dataReceived(data)
-	funcType = type(protocol.dataReceived)
-	protocol.dataReceived = funcType(dataReceived, protocol, protocol.__class__)
-	return protocol
-funcType = type(site.buildProtocol)
-site.buildProtocol = funcType(buildProtocol, site, server.Site)
-print "Done!"
 
-#run!
-print "Server start!\n"
-if useWSGI:
-	#probably doesn't work
-	application = service.Application('web')
-	sc = service.IServiceCollection(application)
-	internet.TCPServer(port, site).setServiceParent(sc)
-	
-	atexit.register(Log.write, String="Server shutdown", Silent=True)
-else:
-	reactor.listenTCP(port, site)#Hey listen!~
-	reactor.run()
-	
-	#dunn
-	Log.write("Server shutdown", True)
+def create_site():
+    _force_project_working_directory()
+    reactor, twisted_server = _import_twisted()
+
+    print("Initializing flipnote database...", end=" ", flush=True)
+    import DB  # noqa: F401 - initialization is intentional
+    print("Done!")
+
+    log = Log(reactor)
+
+    print("Setting up hatena site...", end=" ", flush=True)
+    import hatena
+    hatena.ServerLog = log
+
+    class ProxyCompatibleSite(twisted_server.Site):
+        """Accept the absolute-form request target sent by HTTP proxy clients."""
+
+        def buildProtocol(self, addr):
+            protocol = super().buildProtocol(addr)
+            old_data_received = protocol.dataReceived
+
+            def data_received(data):
+                for check, repl in (
+                    (b"GET http://flipnote.hatena.com", b"GET "),
+                    (b"POST http://flipnote.hatena.com", b"POST "),
+                ):
+                    if check in data:
+                        data = data.replace(check, repl)
+                return old_data_received(data)
+
+            protocol.dataReceived = data_received
+            return protocol
+
+    site = ProxyCompatibleSite(hatena.Setup())
+    print("Done!")
+    return reactor, site, log
+
+
+def main():
+    print("Importing modules...", end=" ", flush=True)
+    _force_project_working_directory()
+    reactor, site, log = create_site()
+    print("Server start!\n")
+
+    if useWSGI:
+        from twisted.application import internet, service
+
+        application = service.Application("web")
+        internet.TCPServer(port, site).setServiceParent(service.IServiceCollection(application))
+        atexit.register(log.write, String="Server shutdown", Silent=True)
+        return application
+
+    reactor.listenTCP(port, site)
+    try:
+        reactor.run()
+    finally:
+        log.write("Server shutdown", True)
+        log.flush()
+    return None
+
+
+if __name__ == "__main__":
+    main()
