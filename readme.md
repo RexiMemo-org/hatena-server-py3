@@ -25,7 +25,7 @@ Hatena Server also requires a compatible **authentication server** for Flipnote 
 Possible authentication services include:
 
 - **Sudomemo's authentication service** — this may work for personal hardware testing, but its use is **not recommended for emulators or for a publicly released/server deployment**. Always check and follow Sudomemo's current rules and terms before using their infrastructure; do not rely on their service for a deployment they do not permit.
-- **Reximemo's authentication service** — this may be used as an alternative **if it is currently running/available**.
+- **RexiMemo's authentication service** — this may be used as an alternative **if it is currently running/available**.
 
 Whichever service you use, configure the server/client setup so Flipnote Studio can complete authentication before attempting to use the Hatena replacement.
 
